@@ -1,8 +1,3 @@
----
-title: "wk12-Homework"
-output: html_document
----
-
 # 패키지
 ```{r}
 suppressWarnings(suppressMessages(library(tidyverse)))
