@@ -1,0 +1,478 @@
+---
+title: "wk12-Homework"
+output: html_document
+---
+
+# 패키지
+```{r}
+suppressWarnings(suppressMessages(library(tidyverse)))
+library(tidymodels)
+```
+
+```{r}
+library(caret)
+```
+
+```{r}
+library(skimr)
+library(naniar)
+```
+
+```{r}
+library(gridExtra)
+```
+
+```{r}
+library(scales)
+```
+
+# 읽기
+```{r}
+DF <- as.data.frame(read_csv('C:/gss2018b/gss2018b.csv'))
+```
+
+
+# 변수 조정
+```{r}
+DF <- dplyr::select(DF, -PRES12)
+
+DF <- mutate(DF,
+             PRES16=factor(ifelse(PRES16=='T', 'Y', 'N')),
+             RACE=factor(RACE),
+             SEX=factor(SEX),
+             MARITAL=factor(MARITAL))
+
+DF <- mutate(DF,
+             RACE=factor(RACE, labels=make.names(levels(RACE))),
+             SEX=factor(SEX, labels=make.names(levels(SEX))),
+             MARITAL=factor(MARITAL, labels=make.names(levels(MARITAL))))
+head(DF)
+```
+
+```{r}
+summary(DF)
+```
+
+# 결측
+```{r}
+DF %>% skim()
+```
+
+```{r}
+DF %>% group_by(PRES16) %>% skim()
+```
+
+```{r}
+sum(complete.cases(DF))/nrow(DF)*100
+```
+
+```{r}
+naniar::vis_miss(DF)
+```
+
+```{r}
+naniar::miss_var_summary(DF)
+```
+
+# 간단 탐색
+```{r}
+featurePlot(x=select_if(DF, is.numeric), y=DF$PRES16,
+            plot='box',
+            scales=list(x=list(relation='free'), y=list(relation='free')))
+```
+
+# 분할
+```{r}
+set.seed(20171701)
+Ris <- initial_split(DF, prop=0.75, strata=PRES16)
+TR <- training(Ris)
+TS <- testing(Ris)
+```
+
+# 전처리
+```{r}
+RC <- recipe(PRES16~., data=TR) %>%
+      step_medianimpute(all_numeric(), -all_outcomes()) %>%
+      step_modeimpute(all_nominal(), -all_outcomes()) %>%
+      step_dummy(all_nominal(), -all_outcomes())
+RC
+```
+
+# 튜닝계획 지정
+```{r}
+trCntl <- trainControl(
+          method='cv', number=10,
+          summaryFunction=twoClassSummary,
+          classProbs=TRUE)
+```
+
+# glm
+```{r}
+modelLookup('glm')
+```
+
+```{r}
+set.seed(20171701)
+
+Mglm <- train(RC, data=TR,
+              method='glm', family='binomial',
+              metric='ROC',
+              trControl=trCntl)
+Mglm
+```
+
+```{r}
+Mglm$results
+```
+
+```{r}
+summary(Mglm)
+```
+
+```{r}
+ggplot(varImp(Mglm))
+```
+
+```{r}
+Mglm$bestTune
+```
+
+```{r}
+Mglm$finalModel
+```
+
+```{r}
+Mglm$resample
+```
+
+```{r}
+TROUT <- TR %>% dplyr::select(PRES16)
+TSOUT <- TS %>% dplyr::select(PRES16)
+TROUT <- TROUT %>% bind_cols(phglm=predict(Mglm, newdata=TR, type='prob')[,'Y'])
+TSOUT <- TSOUT %>% bind_cols(phglm=predict(Mglm, newdata=TS, type='prob')[,'Y'])
+TROUT <- TROUT %>% bind_cols(yhglm=predict(Mglm, newdata=TR))
+TSOUT <- TSOUT %>% bind_cols(yhglm=predict(Mglm, newdata=TS))
+head(TSOUT)
+```
+
+```{r}
+foo <- function(y, ph, yh, event_level='frist'){
+  
+  cnf <- table(yh, y)
+  if(event_level == 'second'){
+    tn <- cnf[1,1]; fn <- cnf[1,2]; fp <- cnf[2,1]; tp <- cnf[2,2];
+  }else {
+    tn <- cnf[2,2]; fn <- cnf[2,1]; fp <- cnf[1,2]; tp <- cnf[1,1];
+  }
+  
+  c(acc = accuracy_vec(y, yh),
+    auc = roc_auc_vec(y, ph, event_level=event_level),
+    prauc = pr_auc_vec(y, ph, event_level=event_level),
+    f1 = f_meas_vec(y, yh, event_level=event_level),
+    kap = kap_vec(y, yh),
+    sens = sens_vec(y, yh, event_level=event_level),
+    spec = spec_vec(y, yh, event_level=event_level),
+    prec = precision_vec(y, yh, event_level=event_level),
+    tn = tn,
+    fn = fn,
+    fp = fp,
+    tp = tp
+    )
+}
+foo(TSOUT$PRES16, TSOUT$phglm, TSOUT$yhglm, event_level='second')
+```
+
+```{r}
+g1 <- autoplot(roc_curve(TROUT, 'PRES16', 'phglm', event_level='second'))
+g2 <- autoplot(roc_curve(TSOUT, 'PRES16', 'phglm', event_level='second'))
+g3 <- autoplot(pr_curve(TROUT, 'PRES16', 'phglm', event_level='second'))
+g4 <- autoplot(pr_curve(TSOUT, 'PRES16', 'phglm', event_level='second'))
+grid.arrange(g1, g2, g3, g4, ncol=2)
+```
+
+```{r}
+confusionMatrix(data=TSOUT$yhglm, reference=TSOUT$PRES16, positive='Y')
+```
+
+```{r}
+cnf <- conf_mat(TSOUT, 'PRES16', 'yhglm')
+summary(cnf, event_level='second')
+```
+
+```{r}
+autoplot(cnf, event_level='second')
+```
+
+```{r}
+METglm <- 
+  bind_cols(
+    bind_rows(foo(TROUT$PRES16, TROUT$phglm, TROUT$yhglm, event_level = 'second'),
+              foo(TSOUT$PRES16, TSOUT$phglm, TSOUT$yhglm, event_level = 'second')),
+    data.frame(model='glm', TRTS=c('TR', 'TS')))
+METglm
+```
+
+
+# glmStepAIC
+```{r}
+modelLookup('glmStepAIC')
+```
+
+```{r}
+set.seed(20171701)
+Mstep <- train(RC, data=TR,
+               method='glmStepAIC', direction='backward',
+               metric='ROC',
+               trControl=trCntl)
+```
+
+```{r}
+Mstep
+```
+
+```{r}
+Mstep$results
+```
+
+```{r}
+summary(Mstep)
+```
+
+```{r}
+ggplot(varImp(Mstep))
+```
+
+```{r}
+Mstep$bestTune
+```
+
+```{r}
+Mstep$finalModel
+```
+
+```{r}
+Mstep$resample
+```
+
+```{r}
+TROUT <- TROUT %>% bind_cols(phstep=predict(Mstep, newdata=TR, type='prob')[,'Y'])
+TSOUT <- TSOUT %>% bind_cols(phstep=predict(Mstep, newdata=TS, type='prob')[,'Y'])
+TROUT <- TROUT %>% bind_cols(yhstep=predict(Mstep, newdata=TR))
+TSOUT <- TSOUT %>% bind_cols(yhstep=predict(Mstep, newdata=TS))
+head(TSOUT)
+```
+
+```{r}
+foo(TSOUT$PRES16, TSOUT$phstep, TSOUT$yhstep, event_level = 'second')
+```
+
+```{r}
+g1 <- autoplot(roc_curve(TROUT, 'PRES16', 'phstep', event_level='second'))
+g2 <- autoplot(roc_curve(TSOUT, 'PRES16', 'phstep', event_level='second'))
+g3 <- autoplot(pr_curve(TROUT, 'PRES16', 'phstep', event_level='second'))
+g4 <- autoplot(pr_curve(TSOUT, 'PRES16', 'phstep', event_level='second'))
+grid.arrange(g1,g2,g3,g4, ncol=2)
+```
+
+```{r}
+confusionMatrix(data=TSOUT$yhstep, reference=TSOUT$PRES16, positive='Y')
+```
+
+```{r}
+cnf<- conf_mat(TSOUT, 'PRES16', 'yhstep')
+summary(cnf, event_level='second')
+```
+
+```{r}
+autoplot(cnf, event_level='second')
+```
+
+```{r}
+METstep <-
+  bind_cols(
+    bind_rows(foo(TROUT$PRES16, TROUT$phstep, TROUT$yhstep, event_level='second'),
+              foo(TSOUT$PRES16, TSOUT$phstep, TSOUT$yhstep, event_level='second')),
+    data.frame(model='glmStepAIC', TRTS=c('TR', 'TS')))
+METstep
+```
+
+
+# glmnet
+```{r}
+modelLookup('glmnet')
+```
+
+```{r}
+set.seed(20171701)
+glmnetGrid <- expand.grid(alpha=seq(0.1, by=0.25),
+                          lambda=seq(0.0, 0.1, by=0.01))
+Mglmnet <- train(RC, data=TR,
+                 method='glmnet', family='binomial',
+                 metric='ROC',
+                 tuneGrid = glmnetGrid,
+                 trControl=trCntl)
+```
+
+```{r}
+Mglmnet
+```
+
+```{r}
+Mglmnet$results
+```
+
+```{r}
+ggplot(Mglmnet)
+```
+
+```{r}
+summary(Mglmnet)
+```
+
+```{r}
+ggplot(varImp(Mglmnet))
+```
+
+```{r}
+Mglmnet$bestTune
+```
+
+```{r}
+Mglmnet$resample
+```
+
+```{r}
+TROUT <- TROUT %>% bind_cols(phglmnet=predict(Mglmnet, newdata=TR, type='prob')[,'Y'])
+TSOUT <- TSOUT %>% bind_cols(phglmnet=predict(Mglmnet, newdata=TS, type='prob')[,'Y'])
+TROUT <- TROUT %>% bind_cols(yhglmnet=predict(Mglmnet, newdata=TR))
+TSOUT <- TSOUT %>% bind_cols(yhglmnet=predict(Mglmnet, newdata=TS))
+head(TSOUT)
+```
+
+```{r}
+foo(TSOUT$PRES16, TSOUT$phglmnet, TSOUT$yhglmnet, event_level='second')
+```
+
+```{r}
+g1 <- autoplot(roc_curve(TROUT, 'PRES16', 'phglmnet', event_level='second'))
+g2 <- autoplot(roc_curve(TSOUT, 'PRES16', 'phglmnet', event_level='second'))
+g3 <- autoplot(pr_curve(TROUT, 'PRES16', 'phglmnet', event_level='second'))
+g4 <- autoplot(pr_curve(TSOUT, 'PRES16', 'phglmnet', event_level='second'))
+grid.arrange(g1,g2,g3,g4, ncol=2)
+```
+
+```{r}
+confusionMatrix(data=TSOUT$yhglmnet, reference=TSOUT$PRES16, positive='Y')
+```
+
+```{r}
+cnf<- conf_mat(TSOUT, 'PRES16', 'yhglmnet')
+summary(cnf, event_level='second')
+```
+
+```{r}
+autoplot(cnf, event_level='second')
+```
+
+```{r}
+METglmnet <-
+  bind_cols(
+    bind_rows(foo(TROUT$PRES16, TROUT$phglmnet, TROUT$yhglmnet, event_level='second'),
+              foo(TSOUT$PRES16, TSOUT$phglmnet, TSOUT$yhglmnet, event_level='second')),
+    data.frame(model='glmnet', TRTS=c('TR', 'TS')))
+METglmnet
+```
+
+
+# ranger
+```{r}
+modelLookup('ranger')
+```
+
+```{r}
+set.seed(20171701)
+rangerGrid <- expand.grid(
+                          mtry=seq(2, ncol(TR)-1, by=2),
+                          splitrule=c('gini', 'extratrees'),
+                          min.node.size=1:3)
+Mranger<- train(RC, data=TR,
+               method='ranger', importance='impurity',
+               metric='ROC',
+               tuneLength=10,
+               trControl=trCntl)
+```
+
+```{r}
+Mranger
+```
+
+```{r}
+Mranger$results
+```
+
+```{r}
+ggplot(Mranger)
+```
+
+```{r}
+ggplot(varImp(Mranger))
+```
+
+```{r}
+Mranger$bestTune
+```
+
+```{r}
+Mranger$finalModel
+```
+
+```{r}
+Mranger$resample
+```
+
+```{r}
+TROUT <- TROUT %>% bind_cols(phranger=predict(Mranger, newdata=TR, type='prob')[,'Y'])
+TSOUT <- TSOUT %>% bind_cols(phranger=predict(Mranger, newdata=TS, type='prob')[,'Y'])
+TROUT <- TROUT %>% bind_cols(yhranger=predict(Mranger, newdata=TR))
+TSOUT <- TSOUT %>% bind_cols(yhranger=predict(Mranger, newdata=TS))
+head(TSOUT)
+```
+
+```{r}
+foo(TSOUT$PRES16, TSOUT$phranger, TSOUT$yhranger, event_level='second')
+```
+
+```{r}
+g1 <- autoplot(roc_curve(TROUT, 'PRES16', 'phranger', event_level='second'))
+g2 <- autoplot(roc_curve(TSOUT, 'PRES16', 'phranger', event_level='second'))
+g3 <- autoplot(pr_curve(TROUT, 'PRES16', 'phranger', event_level='second'))
+g4 <- autoplot(pr_curve(TSOUT, 'PRES16', 'phranger', event_level='second'))
+grid.arrange(g1,g2,g3,g4, ncol=2)
+```
+
+```{r}
+confusionMatrix(data=TSOUT$yhranger, reference=TSOUT$PRES16, positive='Y')
+```
+
+```{r}
+cnf<- conf_mat(TSOUT, 'PRES16', 'yhranger')
+summary(cnf, event_level='second')
+```
+
+```{r}
+autoplot(cnf, event_level='second')
+```
+
+```{r}
+METranger <-
+  bind_cols(
+    bind_rows(foo(TROUT$PRES16, TROUT$phranger, TROUT$yhranger, event_level='second'),
+              foo(TSOUT$PRES16, TSOUT$phranger, TSOUT$yhranger, event_level='second')),
+    data.frame(model='ranger', TRTS=c('TR', 'TS')))
+METranger
+
+```
+
+```{R}
+ggplot(varImp(TSOUT))
+```
